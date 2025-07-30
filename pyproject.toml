@@ -10,3 +10,7 @@ dependencies = [
     "yt-dlp>=2025.7.21",
     "rich>=13.0.0",
 ]
+
+[project.scripts]
+ytscribe = "main:app"
+yts = "main:app"

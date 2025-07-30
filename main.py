@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import TextFormatter
+from youtube_transcript_api.proxies import WebshareProxyConfig
 import yt_dlp
 
 app = typer.Typer(help="Download YouTube video transcripts and videos")
@@ -75,13 +76,21 @@ def get_playlist_info(playlist_url: str) -> dict:
             console.print(f"[red]Error getting playlist info: {e}[/red]")
             return {'title': 'Unknown Playlist', 'entries': []}
 
-def download_transcript(video_id: str, download_path: Path) -> bool:
+def download_transcript(video_id: str, download_path: Path, proxy_username: Optional[str] = None, proxy_password: Optional[str] = None) -> bool:
     """Download transcript for a single video"""
     try:
         video_info = get_video_info(video_id)
         title = sanitize_filename(video_info['title'])
         
-        ytt_api = YouTubeTranscriptApi()
+        if proxy_username and proxy_password:
+            proxy_config = WebshareProxyConfig(
+                proxy_username=proxy_username,
+                proxy_password=proxy_password,
+            )
+            ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+        else:
+            ytt_api = YouTubeTranscriptApi()
+        
         transcript = ytt_api.fetch(video_id)
         formatter = TextFormatter()
         text_formatted = formatter.format_transcript(transcript)
@@ -133,8 +142,22 @@ def download(
         "-vid", "--video", 
         help="Also download the video files"
     ),
+    username: Optional[str] = typer.Option(
+        None,
+        "-username",
+        help="Webshare proxy username (must be used with --password)"
+    ),
+    password: Optional[str] = typer.Option(
+        None,
+        "-password",
+        help="Webshare proxy password (must be used with --username)"
+    ),
 ):
     """Download transcripts (and optionally videos) from YouTube URLs"""
+    
+    if (username is None) != (password is None):
+        console.print("[red]Error: Both -username and -password must be provided together for proxy support[/red]")
+        raise typer.Exit(1)
     
     if location:
         download_path = Path(location).expanduser().resolve()
@@ -144,6 +167,9 @@ def download(
     download_path.mkdir(parents=True, exist_ok=True)
     
     console.print(f"[blue]Download location:[/blue] {download_path}")
+    
+    if username and password:
+        console.print(f"[blue]Using Webshare proxy with username:[/blue] {username}")
     
     total_success = 0
     total_failed = 0
@@ -169,7 +195,7 @@ def download(
                     task = progress.add_task("Processing playlist...", total=len(playlist_info['entries']))
                     
                     for video_id in playlist_info['entries']:
-                        if download_transcript(video_id, playlist_path):
+                        if download_transcript(video_id, playlist_path, username, password):
                             total_success += 1
                         else:
                             total_failed += 1
@@ -185,7 +211,7 @@ def download(
             else:
                 video_id = extract_video_id(url)
                 
-                if download_transcript(video_id, download_path):
+                if download_transcript(video_id, download_path, username, password):
                     total_success += 1
                 else:
                     total_failed += 1

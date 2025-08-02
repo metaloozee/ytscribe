@@ -20,6 +20,10 @@ def sanitize_filename(filename: str) -> str:
     invalid_chars = r'[<>:"/\\|?*]'
     sanitized = re.sub(invalid_chars, '_', filename)
     sanitized = sanitized.strip('. ')
+    
+    if not sanitized:
+        sanitized = "untitled"
+    
     return sanitized[:200] if len(sanitized) > 200 else sanitized
 
 def extract_video_id(url: str) -> str:
@@ -49,10 +53,13 @@ def get_video_info(video_id: str) -> dict:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-            return {
-                'title': info.get('title', f'video_{video_id}'),
-                'id': video_id
-            }
+            if info is not None:
+                return {
+                    'title': info.get('title', f'video_{video_id}'),
+                    'id': video_id
+                }
+            else:
+                return {'title': f'video_{video_id}', 'id': video_id}
         except Exception as e:
             console.print(f"[red]Error getting video info for {video_id}: {e}[/red]")
             return {'title': f'video_{video_id}', 'id': video_id}
@@ -68,32 +75,47 @@ def get_playlist_info(playlist_url: str) -> dict:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(playlist_url, download=False)
-            return {
-                'title': info.get('title', 'Unknown Playlist'),
-                'entries': [entry['id'] for entry in info.get('entries', []) if entry]
-            }
+            if info is not None:
+                return {
+                    'title': info.get('title', 'Unknown Playlist'),
+                    'entries': [entry['id'] for entry in info.get('entries', []) if entry and 'id' in entry]
+                }
+            else:
+                return {'title': 'Unknown Playlist', 'entries': []}
         except Exception as e:
             console.print(f"[red]Error getting playlist info: {e}[/red]")
             return {'title': 'Unknown Playlist', 'entries': []}
 
-def download_transcript(video_id: str, download_path: Path, proxy_username: Optional[str] = None, proxy_password: Optional[str] = None) -> bool:
+def download_transcript(video_id: str, download_path: Path, proxy_username: Optional[str] = None, proxy_password: Optional[str] = None, languages: Optional[List[str]] = None) -> bool:
     """Download transcript for a single video"""
     try:
         video_info = get_video_info(video_id)
         title = sanitize_filename(video_info['title'])
         
         if proxy_username and proxy_password:
-            proxy_config = WebshareProxyConfig(
-                proxy_username=proxy_username,
-                proxy_password=proxy_password,
-            )
-            ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+            try:
+                proxy_config = WebshareProxyConfig(
+                    proxy_username=proxy_username,
+                    proxy_password=proxy_password,
+                )
+                ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+            except Exception as proxy_error:
+                console.print(f"[yellow]Warning: Proxy configuration failed ({proxy_error}), using direct connection[/yellow]")
+                ytt_api = YouTubeTranscriptApi()
         else:
             ytt_api = YouTubeTranscriptApi()
         
-        transcript = ytt_api.fetch(video_id)
+        if languages:
+            transcript = ytt_api.fetch(video_id, languages=languages)
+        else:
+            transcript = ytt_api.fetch(video_id)
+            
         formatter = TextFormatter()
         text_formatted = formatter.format_transcript(transcript)
+        
+        language_info = ""
+        if hasattr(transcript, 'language_code') and hasattr(transcript, 'language'):
+            language_info = f" ({transcript.language_code}: {transcript.language})"
         
         filename = f"{title} transcript.txt"
         file_path = download_path / filename
@@ -101,7 +123,7 @@ def download_transcript(video_id: str, download_path: Path, proxy_username: Opti
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(text_formatted)
         
-        console.print(f"[green]✓[/green] Transcript saved: {filename}")
+        console.print(f"[green]✓[/green] Transcript saved: {filename}{language_info}")
         return True
         
     except Exception as e:
@@ -117,6 +139,8 @@ def download_video(video_id: str, download_path: Path) -> bool:
         ydl_opts = {
             'outtmpl': str(download_path / f"{title}.%(ext)s"),
             'format': 'best[height<=720]',
+            'quiet': True,
+            'no_warnings': True,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -152,6 +176,11 @@ def download(
         "-password",
         help="Webshare proxy password (must be used with --username)"
     ),
+    languages: Optional[List[str]] = typer.Option(
+        None,
+        "-language", "--languages",
+        help="Preferred language codes for transcripts (e.g., 'en', 'es', 'fr'). Multiple languages can be specified in order of preference."
+    ),
 ):
     """Download transcripts (and optionally videos) from YouTube URLs"""
     
@@ -170,6 +199,9 @@ def download(
     
     if username and password:
         console.print(f"[blue]Using Webshare proxy with username:[/blue] {username}")
+    
+    if languages:
+        console.print(f"[blue]Preferred transcript languages:[/blue] {', '.join(languages)}")
     
     total_success = 0
     total_failed = 0
@@ -195,7 +227,7 @@ def download(
                     task = progress.add_task("Processing playlist...", total=len(playlist_info['entries']))
                     
                     for video_id in playlist_info['entries']:
-                        if download_transcript(video_id, playlist_path, username, password):
+                        if download_transcript(video_id, playlist_path, username, password, languages):
                             total_success += 1
                         else:
                             total_failed += 1
@@ -211,7 +243,7 @@ def download(
             else:
                 video_id = extract_video_id(url)
                 
-                if download_transcript(video_id, download_path, username, password):
+                if download_transcript(video_id, download_path, username, password, languages):
                     total_success += 1
                 else:
                     total_failed += 1

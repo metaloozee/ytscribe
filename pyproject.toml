@@ -1,6 +1,6 @@
 [project]
 name = "ytscribe"
-version = "0.1.0"
+version = "0.2.0"
 description = "A CLI tool to download YouTube video transcripts and videos using typer, youtube-transcript-api, and yt-dlp"
 readme = "README.md"
 requires-python = ">=3.11"

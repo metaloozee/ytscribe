@@ -419,6 +419,9 @@ def download_video(
     progress: Optional[Progress] = None
 ) -> Tuple[bool, str]:
     """Download video using yt-dlp with improved error handling"""
+    # Define fallback title in case get_video_info fails
+    title = video_id
+
     try:
         if progress and progress_task:
             progress.update(progress_task, description=f"Getting video info for {video_id[:8]}...")
@@ -451,7 +454,7 @@ def download_video(
         return True, title
 
     except Exception as e:
-        error_msg = f"Video download failed for '{video_info.get('title', video_id)}': {str(e)}"
+        error_msg = f"Video download failed for '{title}': {str(e)}"
         console.print(f"[red]✗[/red] {error_msg}")
         logger.error(error_msg)
         return False, error_msg

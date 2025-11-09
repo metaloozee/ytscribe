@@ -2,6 +2,7 @@ import os
 import re
 import json
 import logging
+import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
@@ -21,6 +22,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import TextFormatter
 from youtube_transcript_api.proxies import WebshareProxyConfig
 import yt_dlp
+from yt_dlp.utils import DownloadError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Application setup
@@ -33,14 +35,21 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 KEYRING_SERVICE = "ytscribe"
 KEYRING_USERNAME_KEY = "proxy_username"
 
-# Logging setup
+# Logging setup - ensure CONFIG_DIR exists before creating FileHandler
+try:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    log_handlers = [
+        logging.FileHandler(CONFIG_DIR / "ytscribe.log"),
+        logging.StreamHandler()
+    ]
+except (IOError, OSError):
+    # Fall back to StreamHandler only if FileHandler creation fails
+    log_handlers = [logging.StreamHandler()]
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(CONFIG_DIR / "ytscribe.log") if CONFIG_DIR.exists() else logging.NullHandler(),
-        logging.StreamHandler()
-    ]
+    handlers=log_handlers
 )
 logger = logging.getLogger(__name__)
 
@@ -63,12 +72,29 @@ def load_config() -> Dict[str, Any]:
     return {}
 
 
+def _remove_sensitive_data(obj: Any) -> Any:
+    """Recursively remove password keys from nested dictionaries"""
+    if isinstance(obj, dict):
+        # Create new dict without password keys
+        return {
+            key: _remove_sensitive_data(value)
+            for key, value in obj.items()
+            if key != 'password'
+        }
+    elif isinstance(obj, list):
+        # Process each item in the list
+        return [_remove_sensitive_data(item) for item in obj]
+    else:
+        # Return primitive values as-is
+        return obj
+
+
 def save_config(config: Dict[str, Any]) -> None:
     """Save configuration to file (excluding sensitive data)"""
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        # Don't save passwords to config file anymore
-        safe_config = {k: v for k, v in config.items() if k != 'proxy' or 'password' not in str(v)}
+        # Don't save passwords to config file - use structure-aware filtering
+        safe_config = _remove_sensitive_data(copy.deepcopy(config))
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(safe_config, f, indent=2)
         # Set restrictive permissions on config file
@@ -177,7 +203,7 @@ def display_playlist_preview_table(playlist_videos: List[Dict[str, Any]]) -> Non
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((URLError, ConnectionError, TimeoutError))
+    retry=retry_if_exception_type((URLError, ConnectionError, TimeoutError, DownloadError))
 )
 def get_detailed_playlist_info(playlist_url: str) -> Dict[str, Any]:
     """Get detailed playlist information including video metadata with retry logic"""
@@ -271,7 +297,7 @@ def extract_video_id(url: str) -> str:
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((URLError, ConnectionError, TimeoutError))
+    retry=retry_if_exception_type((URLError, ConnectionError, TimeoutError, DownloadError))
 )
 def get_video_info(video_id: str) -> Dict[str, str]:
     """Get video information using yt-dlp with retry logic"""
@@ -301,7 +327,7 @@ def get_video_info(video_id: str) -> Dict[str, str]:
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((URLError, ConnectionError, TimeoutError))
+    retry=retry_if_exception_type((URLError, ConnectionError, TimeoutError, DownloadError))
 )
 def get_playlist_info(playlist_url: str) -> Dict[str, Any]:
     """Get playlist information and video IDs with retry logic"""

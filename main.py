@@ -354,6 +354,124 @@ def get_playlist_info(playlist_url: str) -> Dict[str, Any]:
             return {'title': 'Unknown Playlist', 'entries': []}
 
 
+def get_available_transcript_languages(
+    video_id: str,
+    proxy_username: Optional[str] = None,
+    proxy_password: Optional[str] = None
+) -> List[Dict[str, str]]:
+    """
+    Get list of available transcript languages for a video
+
+    Returns:
+        List of dicts with 'language' and 'language_code' keys, or empty list if none available
+    """
+    try:
+        if proxy_username and proxy_password:
+            try:
+                proxy_config = WebshareProxyConfig(
+                    proxy_username=proxy_username,
+                    proxy_password=proxy_password,
+                )
+                ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+            except Exception:
+                ytt_api = YouTubeTranscriptApi()
+        else:
+            ytt_api = YouTubeTranscriptApi()
+
+        # List all available transcripts
+        transcript_list = ytt_api.list_transcripts(video_id)
+
+        available_languages = []
+        for transcript in transcript_list:
+            available_languages.append({
+                'language': transcript.language,
+                'language_code': transcript.language_code,
+                'is_generated': transcript.is_generated,
+                'is_translatable': transcript.is_translatable
+            })
+
+        return available_languages
+    except Exception as e:
+        logger.debug(f"Could not fetch transcript languages for {video_id}: {e}")
+        return []
+
+
+def prompt_language_selection(
+    video_id: str,
+    video_title: str,
+    available_languages: List[Dict[str, str]]
+) -> Optional[List[str]]:
+    """
+    Prompt user to select transcript language(s) from available options
+
+    Returns:
+        List of selected language codes, or None if cancelled
+    """
+    if not available_languages:
+        console.print(f"[yellow]No transcripts available for '{video_title}'[/yellow]")
+        return None
+
+    # If only one language available, auto-select it
+    if len(available_languages) == 1:
+        lang = available_languages[0]
+        console.print(f"[cyan]Only one transcript available: {lang['language']} ({lang['language_code']})[/cyan]")
+        if Confirm.ask("Use this language?", default=True):
+            return [lang['language_code']]
+        return None
+
+    # Display available languages
+    console.print(f"\n[bold blue]Available transcript languages for '{video_title[:50]}':[/bold blue]")
+
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Language", style="cyan")
+    table.add_column("Code", style="green")
+    table.add_column("Type", style="yellow")
+
+    for idx, lang in enumerate(available_languages, 1):
+        lang_type = "Auto-generated" if lang.get('is_generated') else "Manual"
+        table.add_row(
+            str(idx),
+            lang['language'],
+            lang['language_code'],
+            lang_type
+        )
+
+    console.print(table)
+
+    # Prompt for selection
+    console.print("\n[dim]Enter language number(s) separated by commas (e.g., 1 or 1,3,5)[/dim]")
+    console.print("[dim]Or press Enter to use auto-detected language[/dim]")
+
+    selection = Prompt.ask("Select language(s)", default="")
+
+    if not selection.strip():
+        # Use auto-detect (no language specified)
+        return []
+
+    try:
+        # Parse selection
+        indices = [int(s.strip()) for s in selection.split(',')]
+        selected_codes = []
+
+        for idx in indices:
+            if 1 <= idx <= len(available_languages):
+                selected_codes.append(available_languages[idx - 1]['language_code'])
+            else:
+                console.print(f"[yellow]Warning: Invalid selection '{idx}' - skipping[/yellow]")
+
+        if selected_codes:
+            console.print(f"[green]Selected: {', '.join(selected_codes)}[/green]")
+            return selected_codes
+        else:
+            console.print("[yellow]No valid languages selected, using auto-detect[/yellow]")
+            return []
+
+    except ValueError:
+        console.print("[red]Invalid input format. Using auto-detect.[/red]")
+        return []
+
+
 def download_transcript(
     video_id: str,
     download_path: Path,
@@ -652,7 +770,8 @@ def _process_individual_videos(
     languages: Optional[List[str]],
     download_video_flag: bool,
     max_concurrent: int,
-    verbose: bool
+    verbose: bool,
+    no_interactive: bool = False
 ) -> Tuple[List[str], List[str]]:
     """Process individual videos and return successful and failed items"""
     successful_items = []
@@ -668,6 +787,27 @@ def _process_individual_videos(
         try:
             video_id = extract_video_id(url)
 
+            # If no languages specified and interactive mode enabled, prompt user to select from available languages
+            selected_languages = languages
+            if not languages and not no_interactive:
+                console.print("\n[cyan]Fetching available transcript languages...[/cyan]")
+                video_info = get_video_info(video_id)
+                available_langs = get_available_transcript_languages(video_id, username, password)
+
+                if available_langs:
+                    selected_languages = prompt_language_selection(
+                        video_id,
+                        video_info.get('title', video_id),
+                        available_langs
+                    )
+                    if selected_languages is None:
+                        # User cancelled selection
+                        console.print("[yellow]Language selection cancelled, skipping video[/yellow]")
+                        failed_items.append(f"Cancelled: {video_info.get('title', video_id)}")
+                        return successful_items, failed_items
+                else:
+                    console.print("[yellow]Could not fetch available languages, will try auto-detect[/yellow]")
+
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
@@ -676,7 +816,7 @@ def _process_individual_videos(
                 task = progress.add_task("Processing video...", total=1)
 
                 success, result = download_transcript(
-                    video_id, download_path, username, password, languages, task, progress
+                    video_id, download_path, username, password, selected_languages, task, progress
                 )
                 if success:
                     successful_items.append(result)
@@ -773,6 +913,11 @@ def download(
         False,
         "-f", "--force",
         help="Skip confirmation prompts"
+    ),
+    no_interactive: bool = typer.Option(
+        False,
+        "--no-interactive",
+        help="Disable interactive language selection (useful for automation)"
     ),
 ):
     """Download transcripts (and optionally videos) from YouTube URLs"""
@@ -897,7 +1042,7 @@ def download(
     # Process individual videos
     video_success, video_failed = _process_individual_videos(
         individual_video_urls, download_path, username, password, languages,
-        download_video_flag, max_concurrent, verbose
+        download_video_flag, max_concurrent, verbose, no_interactive
     )
 
     # Combine results
@@ -1009,6 +1154,7 @@ def info():
     info_text.append("• Download transcripts from YouTube videos and playlists\n")
     info_text.append("• Optional video downloading with quality control\n")
     info_text.append("• Proxy support for restricted regions\n")
+    info_text.append("• Interactive language selection with auto-detection\n")
     info_text.append("• Multiple language transcript support\n")
     info_text.append("• Configuration persistence\n")
     info_text.append("• Preview mode with detailed playlist tables\n")
@@ -1020,6 +1166,8 @@ def info():
     info_text.append("Examples:\n", style="bold")
     info_text.append("  ytscribe download 'https://youtube.com/watch?v=VIDEO_ID'\n")
     info_text.append("  ytscribe download VIDEO_ID --video --location ~/Videos\n")
+    info_text.append("  ytscribe download VIDEO_ID --languages en es  # Specify language preferences\n")
+    info_text.append("  ytscribe download VIDEO_ID --no-interactive  # Skip language selection\n")
     info_text.append("  ytscribe download VIDEO_ID1 VIDEO_ID2 VIDEO_ID3 --max-concurrent 5\n")
     info_text.append("  ytscribe download PLAYLIST_URL --preview\n")
     info_text.append("  ytscribe download PLAYLIST_URL --max-concurrent 5\n")
